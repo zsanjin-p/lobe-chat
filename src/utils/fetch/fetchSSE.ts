@@ -2,6 +2,7 @@ import { isObject } from 'lodash-es';
 
 import { MESSAGE_CANCEL_FLAT } from '@/const/message';
 import { LOBE_CHAT_OBSERVATION_ID, LOBE_CHAT_TRACE_ID } from '@/const/trace';
+import { parseToolCalls } from '@/libs/agent-runtime';
 import { ChatErrorType } from '@/types/fetch';
 import { SmoothingParams } from '@/types/llm';
 import {
@@ -10,13 +11,15 @@ import {
   MessageToolCallChunk,
   MessageToolCallSchema,
   ModelReasoning,
+  ModelSpeed,
   ModelTokensUsage,
 } from '@/types/message';
+import { ChatImageChunk } from '@/types/message/image';
 import { GroundingSearch } from '@/types/search';
+import { nanoid } from '@/utils/uuid';
 
 import { fetchEventSource } from './fetchEventSource';
 import { getMessageError } from './parseError';
-import { parseToolCalls } from './parseToolCalls';
 
 type SSEFinishType = 'done' | 'error' | 'abort';
 
@@ -24,8 +27,10 @@ export type OnFinishHandler = (
   text: string,
   context: {
     grounding?: GroundingSearch;
+    images?: ChatImageChunk[];
     observationId?: string | null;
     reasoning?: ModelReasoning;
+    speed?: ModelSpeed;
     toolCalls?: MessageToolCall[];
     traceId?: string | null;
     type?: SSEFinishType;
@@ -38,9 +43,21 @@ export interface MessageUsageChunk {
   usage: ModelTokensUsage;
 }
 
+export interface MessageSpeedChunk {
+  speed: ModelSpeed;
+  type: 'speed';
+}
+
 export interface MessageTextChunk {
   text: string;
   type: 'text';
+}
+
+export interface MessageBase64ImageChunk {
+  id: string;
+  image: ChatImageChunk;
+  images: ChatImageChunk[];
+  type: 'base64_image';
 }
 
 export interface MessageReasoningChunk {
@@ -71,7 +88,9 @@ export interface FetchSSEOptions {
       | MessageToolCallsChunk
       | MessageReasoningChunk
       | MessageGroundingChunk
-      | MessageUsageChunk,
+      | MessageUsageChunk
+      | MessageBase64ImageChunk
+      | MessageSpeedChunk,
   ) => void;
   smoothing?: SmoothingParams | boolean;
 }
@@ -330,6 +349,9 @@ export const fetchSSE = async (url: string, options: RequestInit & FetchSSEOptio
 
   let grounding: GroundingSearch | undefined = undefined;
   let usage: ModelTokensUsage | undefined = undefined;
+  let images: ChatImageChunk[] = [];
+  let speed: ModelSpeed | undefined = undefined;
+
   await fetchEventSource(url, {
     body: options.body,
     fetch: options?.fetcher,
@@ -389,6 +411,15 @@ export const fetchSSE = async (url: string, options: RequestInit & FetchSSEOptio
           break;
         }
 
+        case 'base64_image': {
+          const id = 'tmp_img_' + nanoid();
+          const item = { data, id, isBase64: true };
+          images.push(item);
+
+          options.onMessageHandle?.({ id, image: item, images, type: 'base64_image' });
+          break;
+        }
+
         case 'text': {
           // skip empty text
           if (!data) break;
@@ -408,6 +439,12 @@ export const fetchSSE = async (url: string, options: RequestInit & FetchSSEOptio
         case 'usage': {
           usage = data;
           options.onMessageHandle?.({ type: 'usage', usage: data });
+          break;
+        }
+
+        case 'speed': {
+          speed = data;
+          options.onMessageHandle?.({ speed: data, type: 'speed' });
           break;
         }
 
@@ -492,8 +529,10 @@ export const fetchSSE = async (url: string, options: RequestInit & FetchSSEOptio
 
       await options?.onFinish?.(output, {
         grounding,
+        images: images.length > 0 ? images : undefined,
         observationId,
         reasoning: !!thinking ? { content: thinking, signature: thinkingSignature } : undefined,
+        speed,
         toolCalls,
         traceId,
         type: finishedType,
